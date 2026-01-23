@@ -2,7 +2,8 @@ name: Dividend Monitor
 
 on:
   schedule:
-    - cron: '30 7 * * 1-5'   # 工作日 15:30（北京时间）
+    # UTC 07:40 = 北京 15:40（A股收盘后）
+    - cron: '40 7 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -10,7 +11,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,3 +28,18 @@ jobs:
           SERVER_CHAN_KEY: ${{ secrets.SERVER_CHAN_KEY }}
         run: |
           python monitor.py
+
+      # 🔥 保活关键步骤（非常重要）
+      - name: Keep workflow alive
+        if: always()
+        run: |
+          echo "Last run: $(date -u)" > .github/last_run.txt
+
+      - name: Commit keep-alive
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add .github/last_run.txt || true
+          git commit -m "chore: keep workflow alive" || true
+          git push || true

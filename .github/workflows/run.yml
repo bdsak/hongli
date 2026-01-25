@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -21,8 +21,8 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install akshare pytz
 
       - name: Run Dividend Monitor
         env:
@@ -30,11 +30,17 @@ jobs:
         run: |
           python monitor.py
 
-      - name: Commit state file
+      # 🔥 保活关键步骤（防止 workflow 被超时终止）
+      - name: Keep workflow alive
+        if: always()
+        run: |
+          echo "Last run: $(date -u)" > .github/last_run.txt
+
+      - name: Commit keep-alive
         if: always()
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add state.json || true
-          git commit -m "chore: update state" || true
+          git add .github/last_run.txt || true
+          git commit -m "chore: keep workflow alive" || true
           git push || true

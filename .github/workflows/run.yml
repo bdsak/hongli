@@ -30,7 +30,6 @@ jobs:
         run: |
           python monitor.py
 
-      # 🔥 保持 state.json 更新，支持连续天数跟踪
       - name: Commit state file
         if: always()
         run: |

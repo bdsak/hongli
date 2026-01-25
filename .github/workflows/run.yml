@@ -1,17 +1,10 @@
 name: Dividend Monitor
 
 on:
-  # UTC 07:40 = 北京 15:40（A股收盘后）
   schedule:
+    # UTC 07:40 = 北京 15:40（A股收盘后）
     - cron: '40 7 * * 1-5'
-
-  # 手动运行
   workflow_dispatch:
-
-  # 🔑 关键：用于激活 schedule（保留，不会影响正常使用）
-  push:
-    branches:
-      - main
 
 jobs:
   run:
@@ -29,9 +22,20 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+          pip install akshare pytz
 
-      - name: Run monitor
+      - name: Run Dividend Monitor
         env:
           SERVER_CHAN_KEY: ${{ secrets.SERVER_CHAN_KEY }}
         run: |
           python monitor.py
+
+      # 🔥 保持 state.json 更新，支持连续天数跟踪
+      - name: Commit state file
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add state.json || true
+          git commit -m "chore: update state" || true
+          git push || true

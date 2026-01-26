@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -21,16 +21,15 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Dividend Monitor
+      - name: Run monitor
         env:
           SERVER_CHAN_KEY: ${{ secrets.SERVER_CHAN_KEY }}
         run: |
           python monitor.py
 
-      # 🔥 保活关键步骤（防止 workflow 被超时终止）
+      # 🔥 保活关键步骤（非常重要）
       - name: Keep workflow alive
         if: always()
         run: |

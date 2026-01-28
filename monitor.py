@@ -2,189 +2,147 @@ import akshare as ak
 import pandas as pd
 import requests
 import os
-import time
 import json
+import time
+import logging
 import concurrent.futures
 from datetime import datetime, timedelta
-import logging
 
 # ======================
-# 日志设置
+# 基础配置
+# ======================
+THRESHOLD = 0.06          # 年线下 6%
+HIT_DAYS = 3              # 连续 N 天
+CACHE_SECONDS = 3600
+SERVER_CHAN_KEY = os.getenv("SERVER_CHAN_KEY")
+
+# ======================
+# 日志
 # ======================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('monitor_full.log', encoding='utf-8')
+        logging.FileHandler("monitor.log", encoding="utf-8")
     ]
 )
 logger = logging.getLogger(__name__)
 
-SERVER_CHAN_KEY = os.getenv("SERVER_CHAN_KEY")
+# ======================
+# 工具：最近交易日
+# ======================
+def last_trade_date():
+    cal = ak.tool_trade_date_hist_sina()
+    cal["trade_date"] = pd.to_datetime(cal["trade_date"])
+    today = pd.Timestamp.now(tz="Asia/Shanghai").normalize()
+    trade_day = cal[cal["trade_date"] <= today].iloc[-1]["trade_date"]
+    return trade_day.strftime("%Y%m%d"), trade_day.date()
 
 # ======================
 # 缓存
 # ======================
 class DataCache:
-    def __init__(self, cache_dir='cache'):
-        self.cache_dir = cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
-
-    def get(self, code):
-        path = os.path.join(self.cache_dir, f"{code}.json")
+    def __init__(self, path="cache.json"):
+        self.path = path
+        self.data = {}
         if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                cache_time = datetime.fromisoformat(data["cache_time"])
-                if (datetime.now() - cache_time).total_seconds() < 3600:
-                    return data["data"]
-            except:
-                return None
-        return None
+            with open(path, "r", encoding="utf-8") as f:
+                self.data = json.load(f)
 
-    def set(self, code, data):
-        path = os.path.join(self.cache_dir, f"{code}.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(
-                {"cache_time": datetime.now().isoformat(), "data": data},
-                f,
-                ensure_ascii=False,
-                indent=2
-            )
+    def save(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+
+    def hit_days(self, code, hit):
+        record = self.data.get(code, {"days": 0})
+        record["days"] = record["days"] + 1 if hit else 0
+        self.data[code] = record
+        return record["days"]
 
 # ======================
-# Server酱
+# 微信
 # ======================
 def send_wechat(title, content):
     if not SERVER_CHAN_KEY:
         logger.warning("未配置 SERVER_CHAN_KEY")
         return
-
     url = f"https://sctapi.ftqq.com/{SERVER_CHAN_KEY}.send"
-    data = {
+    requests.post(url, data={
         "title": title[:32],
         "desp": content,
         "desp_type": "markdown"
-    }
-    try:
-        requests.post(url, data=data, timeout=15)
-        logger.info("微信通知已发送")
-    except Exception as e:
-        logger.error(f"通知失败: {e}")
+    }, timeout=15)
+    logger.info("微信通知已发送")
 
 # ======================
-# 成分股（仅使用 AkShare，失败直接跳过）
+# 成分股
 # ======================
-def get_all_index_stocks(index_code, index_name):
+def get_index_stocks(code, name):
     try:
-        df = ak.index_stock_cons(symbol=index_code)
-        stocks = []
-        for _, row in df.iterrows():
-            code = str(row.iloc[0])
-            name = row.iloc[1] if len(row) > 1 else ""
-            stocks.append((code, name))
-        logger.info(f"{index_name} 获取成分股 {len(stocks)} 只")
+        df = ak.index_stock_cons(symbol=code)
+        stocks = [(str(r.iloc[0]), r.iloc[1]) for _, r in df.iterrows()]
+        logger.info(f"{name} 成分股 {len(stocks)} 只")
         return stocks
     except Exception as e:
-        logger.error(f"{index_name} 成分股获取失败: {e}")
+        logger.error(f"{name} 成分股失败: {e}")
         return []
 
 # ======================
-# 行情 + 年线（关键修复）
+# 行情
 # ======================
-def get_stock_data_with_cache(code, name, cache):
-    cached = cache.get(code)
-    if cached:
-        return cached
-
+def get_stock(code, name, end_date):
     try:
-        symbol = code  # ✅ 不加 .SH / .SZ
-
-        end = datetime.now()
-        start = end - timedelta(days=420)
+        start = (
+            datetime.strptime(end_date, "%Y%m%d") - timedelta(days=420)
+        ).strftime("%Y%m%d")
 
         df = ak.stock_zh_a_hist(
-            symbol=symbol,
+            symbol=code,
             period="daily",
-            start_date=start.strftime("%Y%m%d"),
-            end_date=end.strftime("%Y%m%d"),
+            start_date=start,
+            end_date=end_date,
             adjust="qfq"
         )
 
-        if df is None or df.empty or len(df) < 260:
+        if df is None or df.empty:
             return None
 
-        # ✅ 真年线
-        df["MA250"] = df["收盘"].rolling(250).mean()
+        df["MA250"] = df["收盘"].rolling(250, min_periods=200).mean()
         df = df.dropna()
         if df.empty:
             return None
 
-        latest = df.iloc[-1]
-
-        result = {
+        last = df.iloc[-1]
+        return {
             "code": code,
             "name": name,
-            "close": float(latest["收盘"]),
-            "ma250": float(latest["MA250"]),
-            "date": str(latest["日期"])
+            "close": float(last["收盘"]),
+            "ma250": float(last["MA250"])
         }
-
-        cache.set(code, result)
-        return result
-
-    except Exception as e:
-        logger.debug(f"{code} 行情失败: {e}")
+    except:
         return None
 
 # ======================
-# 条件判断（核心修复）
+# 判断
 # ======================
-def check_stock_condition(stock, threshold=0.06):
-    close = stock["close"]
-    ma250 = stock["ma250"]
-
-    deviation = (close - ma250) / ma250
-
-    # ✅ 年线下 -6% ~ 刚站上线 +2%
-    if -threshold <= deviation <= 0.02:
-        stock["deviation"] = deviation
-        stock["deviation_percent"] = deviation * 100
+def check(stock):
+    close, ma = stock["close"], stock["ma250"]
+    deviation = (ma - close) / ma
+    if 0 < deviation <= THRESHOLD:
+        stock["deviation"] = deviation * 100
         return stock
     return None
 
 # ======================
-# 批量处理
-# ======================
-def process_stocks(stocks, index_name):
-    cache = DataCache()
-    hits = []
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {
-            pool.submit(get_stock_data_with_cache, c, n, cache): (c, n)
-            for c, n in stocks
-        }
-
-        for future in concurrent.futures.as_completed(futures):
-            data = future.result()
-            if not data:
-                continue
-            hit = check_stock_condition(data)
-            if hit:
-                hit["index"] = index_name
-                hits.append(hit)
-                logger.info(f"命中 {hit['code']} {hit['name']} {hit['deviation_percent']:.2f}%")
-
-    return hits
-
-# ======================
-# 主程序
+# 主逻辑
 # ======================
 def main():
     logger.info("红利指数监控启动")
+
+    trade_str, trade_date = last_trade_date()
+    today = datetime.now().date()
+    is_trade_day = today == trade_date
 
     index_map = {
         "中证红利": "000922",
@@ -192,33 +150,52 @@ def main():
         "深证红利": "399324"
     }
 
-    all_hits = []
-    total = 0
+    cache = DataCache()
+    hits = []
 
     for name, code in index_map.items():
-        stocks = get_all_index_stocks(code, name)
-        total += len(stocks)
-        hits = process_stocks(stocks, name)
-        all_hits.extend(hits)
-        time.sleep(2)
+        stocks = get_index_stocks(code, name)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+            tasks = [
+                pool.submit(get_stock, c, n, trade_str)
+                for c, n in stocks
+            ]
+            for t in concurrent.futures.as_completed(tasks):
+                data = t.result()
+                if not data:
+                    continue
+                hit = check(data)
+                days = cache.hit_days(data["code"], bool(hit))
+                if hit and days >= HIT_DAYS:
+                    hit["days"] = days
+                    hit["index"] = name
+                    hits.append(hit)
 
-    if not all_hits:
+        time.sleep(1)
+
+    cache.save()
+
+    # ======================
+    # 推送
+    # ======================
+    status = "📈 今天有行情更新" if is_trade_day else "🛑 今天是非交易日"
+
+    if not hits:
         send_wechat(
             "红利指数监控",
-            f"未发现股票接近年线\n\n检查数量: {total}\n时间: {datetime.now()}"
+            f"{status}\n\n未发现连续 {HIT_DAYS} 天命中股票\n\n时间：{datetime.now()}"
         )
         return
 
-    content = "## 红利指数年线提醒\n\n"
-    for h in sorted(all_hits, key=lambda x: x["deviation_percent"]):
+    content = f"## 红利指数年线提醒\n\n{status}\n\n"
+    for h in sorted(hits, key=lambda x: x["deviation"]):
         content += (
             f"- {h['code']} {h['name']}（{h['index']}）\n"
             f"  收盘 {h['close']:.2f} ｜ 年线 {h['ma250']:.2f}\n"
-            f"  偏离 {h['deviation_percent']:.2f}%\n\n"
+            f"  偏离 {h['deviation']:.2f}% ｜ 连续 {h['days']} 天\n\n"
         )
 
-    send_wechat(f"红利年线提醒（{len(all_hits)}只）", content)
-
+    send_wechat(f"红利年线提醒（{len(hits)}只）", content)
     logger.info("运行完成")
 
 if __name__ == "__main__":

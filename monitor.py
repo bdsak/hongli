@@ -9,11 +9,10 @@ import concurrent.futures
 from datetime import datetime, timedelta
 
 # ======================
-# 基础配置
+# 参数
 # ======================
-THRESHOLD = 0.06          # 年线下 6%
-HIT_DAYS = 3              # 连续 N 天
-CACHE_SECONDS = 3600
+THRESHOLD = 0.06
+HIT_DAYS = 3
 SERVER_CHAN_KEY = os.getenv("SERVER_CHAN_KEY")
 
 # ======================
@@ -30,17 +29,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ======================
-# 工具：最近交易日
+# 最近交易日（✅ 已修复 tz 问题）
 # ======================
 def last_trade_date():
     cal = ak.tool_trade_date_hist_sina()
-    cal["trade_date"] = pd.to_datetime(cal["trade_date"])
-    today = pd.Timestamp.now(tz="Asia/Shanghai").normalize()
+    cal["trade_date"] = pd.to_datetime(cal["trade_date"]).dt.date
+
+    today = datetime.now().date()
     trade_day = cal[cal["trade_date"] <= today].iloc[-1]["trade_date"]
-    return trade_day.strftime("%Y%m%d"), trade_day.date()
+
+    return trade_day.strftime("%Y%m%d"), trade_day
 
 # ======================
-# 缓存
+# 缓存（连续命中）
 # ======================
 class DataCache:
     def __init__(self, path="cache.json"):
@@ -55,10 +56,10 @@ class DataCache:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
 
     def hit_days(self, code, hit):
-        record = self.data.get(code, {"days": 0})
-        record["days"] = record["days"] + 1 if hit else 0
-        self.data[code] = record
-        return record["days"]
+        rec = self.data.get(code, {"days": 0})
+        rec["days"] = rec["days"] + 1 if hit else 0
+        self.data[code] = rec
+        return rec["days"]
 
 # ======================
 # 微信
@@ -135,7 +136,7 @@ def check(stock):
     return None
 
 # ======================
-# 主逻辑
+# 主程序
 # ======================
 def main():
     logger.info("红利指数监控启动")
@@ -156,10 +157,7 @@ def main():
     for name, code in index_map.items():
         stocks = get_index_stocks(code, name)
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-            tasks = [
-                pool.submit(get_stock, c, n, trade_str)
-                for c, n in stocks
-            ]
+            tasks = [pool.submit(get_stock, c, n, trade_str) for c, n in stocks]
             for t in concurrent.futures.as_completed(tasks):
                 data = t.result()
                 if not data:
@@ -170,14 +168,10 @@ def main():
                     hit["days"] = days
                     hit["index"] = name
                     hits.append(hit)
-
         time.sleep(1)
 
     cache.save()
 
-    # ======================
-    # 推送
-    # ======================
     status = "📈 今天有行情更新" if is_trade_day else "🛑 今天是非交易日"
 
     if not hits:

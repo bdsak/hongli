@@ -1,45 +1,27 @@
-name: Dividend Monitor
+name: 红利指数年线监控
 
 on:
   schedule:
-    # UTC 07:40 = 北京 15:40（A股收盘后）
-    - cron: '40 7 * * 1-5'
+    - cron: '30 1 * * *'   # 北京时间 9:30
   workflow_dispatch:
 
 jobs:
-  run:
+  monitor:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
-          pip install -r requirements.txt
+          pip install akshare pandas requests
 
       - name: Run monitor
         env:
           SERVER_CHAN_KEY: ${{ secrets.SERVER_CHAN_KEY }}
         run: |
           python monitor.py
-
-      # 🔥 保活关键步骤（非常重要）
-      - name: Keep workflow alive
-        if: always()
-        run: |
-          echo "Last run: $(date -u)" > .github/last_run.txt
-
-      - name: Commit keep-alive
-        if: always()
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add .github/last_run.txt || true
-          git commit -m "chore: keep workflow alive" || true
-          git push || true

@@ -3,7 +3,7 @@ name: Dividend Monitor
 on:
   # ✅ 定时运行（北京时间 15:40，A 股收盘后）
   schedule:
-    - cron: '40 7 * * 1-5'
+    - cron: '40 7 * * *'
 
   # ✅ 手动兜底
   workflow_dispatch:

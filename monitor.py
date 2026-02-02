@@ -38,6 +38,7 @@ def last_trade_date():
 # ======================
 def send_wechat(title, content):
     if not SERVER_CHAN_KEY:
+        logger.warning("未配置 SERVER_CHAN_KEY")
         return
     url = f"https://sctapi.ftqq.com/{SERVER_CHAN_KEY}.send"
     requests.post(url, data={
@@ -45,20 +46,33 @@ def send_wechat(title, content):
         "desp": content,
         "desp_type": "markdown"
     }, timeout=15)
+    logger.info("微信通知已发送")
 
 # ======================
-# 成分股（官方中证指数）
+# 成分股（混合最稳方案）
 # ======================
 def get_index_stocks(index_code, index_name):
     try:
-        df = ak.index_stock_cons_csindex(symbol=index_code)
-        stocks = list(
-            df[["成分券代码", "成分券名称"]]
-            .astype(str)
-            .itertuples(index=False, name=None)
-        )
+        # 深证红利：走深交所接口（最稳）
+        if index_code == "399324":
+            df = ak.index_stock_cons(symbol=index_code)
+            stocks = list(
+                df.iloc[:, :2]
+                .astype(str)
+                .itertuples(index=False, name=None)
+            )
+        else:
+            # 中证 / 上证红利：中证指数官方
+            df = ak.index_stock_cons_csindex(symbol=index_code)
+            stocks = list(
+                df[["成分券代码", "成分券名称"]]
+                .astype(str)
+                .itertuples(index=False, name=None)
+            )
+
         logger.info(f"{index_name} 成分股 {len(stocks)} 只")
         return stocks
+
     except Exception as e:
         logger.error(f"{index_name} 成分股获取失败: {e}")
         return []
@@ -78,6 +92,7 @@ def get_stock(code, name, end_date):
             end_date=end_date,
             adjust="qfq"
         )
+
         if df is None or len(df) < 250:
             return None
 
@@ -94,7 +109,7 @@ def get_stock(code, name, end_date):
         return None
 
 # ======================
-# 判断
+# 判断条件
 # ======================
 def check(stock):
     dev = (stock["ma250"] - stock["close"]) / stock["ma250"]
@@ -140,7 +155,11 @@ def main():
 
         time.sleep(1)
 
-    md = f"# 红利指数年线监控\n\n- 状态：{status}\n- 命中：{len(hits)} 只\n\n"
+    md = (
+        f"# 红利指数年线监控\n\n"
+        f"- 状态：{status}\n"
+        f"- 命中：{len(hits)} 只\n\n"
+    )
 
     if not hits:
         md += "未发现符合条件的股票"
@@ -154,6 +173,7 @@ def main():
             )
         send_wechat(f"红利年线提醒（{len(hits)}只）", md)
 
+    # GitHub Actions Summary
     if GITHUB_SUMMARY:
         with open(GITHUB_SUMMARY, "a", encoding="utf-8") as f:
             f.write(md)

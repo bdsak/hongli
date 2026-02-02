@@ -10,7 +10,8 @@ from datetime import datetime, timedelta
 # ======================
 # 参数
 # ======================
-THRESHOLD = 0.06
+THRESHOLD = 0.06           # 年线偏离 6%
+UPPER_BOUND = 0.02         # 年线上方 2%
 SERVER_CHAN_KEY = os.getenv("SERVER_CHAN_KEY")
 
 # ======================
@@ -27,15 +28,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ======================
-# 最近交易日（已修复 tz 问题）
+# 最近交易日
 # ======================
 def last_trade_date():
     cal = ak.tool_trade_date_hist_sina()
     cal["trade_date"] = pd.to_datetime(cal["trade_date"]).dt.date
-
     today = datetime.now().date()
     trade_day = cal[cal["trade_date"] <= today].iloc[-1]["trade_date"]
-
     return trade_day.strftime("%Y%m%d"), trade_day
 
 # ======================
@@ -45,7 +44,6 @@ def send_wechat(title, content):
     if not SERVER_CHAN_KEY:
         logger.warning("未配置 SERVER_CHAN_KEY")
         return
-
     url = f"https://sctapi.ftqq.com/{SERVER_CHAN_KEY}.send"
     requests.post(
         url,
@@ -65,51 +63,47 @@ def get_index_stocks(code, name):
     try:
         df = ak.index_stock_cons(symbol=code)
         stocks = [(str(r.iloc[0]), r.iloc[1]) for _, r in df.iterrows()]
-        logger.info(f"{name} 获取成分股 {len(stocks)} 只")
+        logger.info(f"{name} 成分股 {len(stocks)} 只")
         return stocks
     except Exception as e:
-        logger.error(f"{name} 成分股获取失败: {e}")
+        logger.error(f"{name} 成分股失败: {e}")
         return []
 
 # ======================
-# 行情（关键修改：直接获取年线数据）
+# 行情（只用“数据里的年线”，不自己算）
 # ======================
 def get_stock(code, name, end_date):
-    """
-    修改说明：
-    1. 直接调用 ak.stock_a_lg_indicator 获取个股技术指标
-    2. 该接口返回的 DataFrame 包含 'ma250' 等现成指标
-    3. 无需本地计算，直接使用数据源提供的年线
-    """
     try:
-        # 直接获取个股技术指标数据（包含ma250）
-        df = ak.stock_a_lg_indicator(symbol=code)
-        
+        df = ak.stock_zh_a_hist(
+            symbol=code,
+            period="daily",
+            start_date=(datetime.strptime(end_date, "%Y%m%d") - timedelta(days=60)).strftime("%Y%m%d"),
+            end_date=end_date,
+            adjust="qfq"
+        )
+
         if df is None or df.empty:
-            logger.warning(f"股票 {code} {name} 无指标数据")
             return None
-        
-        # 获取最新的指标数据（DataFrame按日期倒序排列）
-        latest = df.iloc[0]
-        
-        # 提取收盘价和ma250
-        close = latest['close']
-        ma250 = latest['ma250']
-        
-        # 检查数据有效性
-        if pd.isna(close) or pd.isna(ma250):
-            logger.warning(f"股票 {code} {name} 收盘价或ma250为空值")
+
+        # 🔑 关键：直接用接口里的 MA250 / 年线
+        ma_cols = [c for c in df.columns if "250" in c or "年线" in c]
+        if not ma_cols:
             return None
-            
+
+        ma_col = ma_cols[0]
+        last = df.iloc[-1]
+
+        if pd.isna(last[ma_col]):
+            return None
+
         return {
             "code": code,
             "name": name,
-            "close": float(close),
-            "ma250": float(ma250)
+            "close": float(last["收盘"]),
+            "ma250": float(last[ma_col])
         }
-        
-    except Exception as e:
-        logger.error(f"获取股票 {code} {name} 指标失败: {e}")
+
+    except Exception:
         return None
 
 # ======================
@@ -117,8 +111,8 @@ def get_stock(code, name, end_date):
 # ======================
 def check(stock):
     close, ma = stock["close"], stock["ma250"]
-    deviation = (ma - close) / ma
-    if 0 < deviation <= THRESHOLD:
+    deviation = (close - ma) / ma
+    if -THRESHOLD <= deviation <= UPPER_BOUND:
         stock["deviation"] = deviation * 100
         return stock
     return None
@@ -127,7 +121,7 @@ def check(stock):
 # 主程序
 # ======================
 def main():
-    logger.info("红利指数监控启动（使用现成年线数据）")
+    logger.info("红利指数监控启动")
 
     trade_str, trade_date = last_trade_date()
     today = datetime.now().date()
@@ -154,7 +148,6 @@ def main():
                 data = t.result()
                 if not data:
                     continue
-
                 hit = check(data)
                 if hit:
                     hit["index"] = index_name
@@ -167,13 +160,11 @@ def main():
     if not hits:
         send_wechat(
             "红利指数监控",
-            f"{status}\n\n未发现符合条件的股票\n\n时间：{datetime.now()}"
+            f"{status}\n\n未发现年线附近股票\n\n时间：{datetime.now()}"
         )
-        logger.info("无命中，已发送状态通知")
         return
 
     content = f"## 红利指数年线提醒\n\n{status}\n\n"
-
     for h in sorted(hits, key=lambda x: x["deviation"]):
         content += (
             f"- {h['code']} {h['name']}（{h['index']}）\n"
@@ -182,7 +173,7 @@ def main():
         )
 
     send_wechat(f"红利年线提醒（{len(hits)}只）", content)
-    logger.info(f"运行完成，共命中 {len(hits)} 只股票")
+    logger.info("运行完成")
 
 if __name__ == "__main__":
     main()

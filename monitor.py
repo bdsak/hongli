@@ -7,16 +7,10 @@ import logging
 import concurrent.futures
 from datetime import datetime, timedelta
 
-# ======================
-# 参数
-# ======================
 THRESHOLD = 0.06
 SERVER_CHAN_KEY = os.getenv("SERVER_CHAN_KEY")
 GITHUB_SUMMARY = os.getenv("GITHUB_STEP_SUMMARY")
 
-# ======================
-# 日志
-# ======================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -38,7 +32,6 @@ def last_trade_date():
 # ======================
 def send_wechat(title, content):
     if not SERVER_CHAN_KEY:
-        logger.warning("未配置 SERVER_CHAN_KEY")
         return
     url = f"https://sctapi.ftqq.com/{SERVER_CHAN_KEY}.send"
     requests.post(url, data={
@@ -46,39 +39,33 @@ def send_wechat(title, content):
         "desp": content,
         "desp_type": "markdown"
     }, timeout=15)
-    logger.info("微信通知已发送")
 
 # ======================
-# 成分股（混合最稳方案）
+# 成分股（正确来源）
 # ======================
 def get_index_stocks(index_code, index_name):
     try:
-        # 深证红利：走深交所接口（最稳）
-        if index_code == "399324":
-            df = ak.index_stock_cons(symbol=index_code)
-            stocks = list(
-                df.iloc[:, :2]
-                .astype(str)
-                .itertuples(index=False, name=None)
-            )
-        else:
-            # 中证 / 上证红利：中证指数官方
+        if index_code == "000922":  # 中证红利
             df = ak.index_stock_cons_csindex(symbol=index_code)
-            stocks = list(
-                df[["成分券代码", "成分券名称"]]
-                .astype(str)
-                .itertuples(index=False, name=None)
-            )
+            stocks = df[["成分券代码", "成分券名称"]]
+        else:  # 上证红利 / 深证红利
+            df = ak.index_stock_cons(symbol=index_code)
+            stocks = df.iloc[:, :2]
 
-        logger.info(f"{index_name} 成分股 {len(stocks)} 只")
-        return stocks
+        result = []
+        for c, n in stocks.itertuples(index=False):
+            code = str(c).split(".")[0].zfill(6)
+            result.append((code, n))
+
+        logger.info(f"{index_name} 成分股 {len(result)} 只")
+        return result
 
     except Exception as e:
         logger.error(f"{index_name} 成分股获取失败: {e}")
         return []
 
 # ======================
-# 行情 + 年线（统一自己算）
+# 行情 + MA250
 # ======================
 def get_stock(code, name, end_date):
     try:
@@ -136,21 +123,16 @@ def main():
 
     hits = []
 
-    for index_name, index_code in index_map.items():
-        stocks = get_index_stocks(index_code, index_name)
+    for name, code in index_map.items():
+        stocks = get_index_stocks(code, name)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-            tasks = [
-                pool.submit(get_stock, c, n, trade_str)
-                for c, n in stocks
-            ]
-            for t in concurrent.futures.as_completed(tasks):
-                data = t.result()
+            for data in pool.map(lambda x: get_stock(x[0], x[1], trade_str), stocks):
                 if not data:
                     continue
                 hit = check(data)
                 if hit:
-                    hit["index"] = index_name
+                    hit["index"] = name
                     hits.append(hit)
 
         time.sleep(1)
@@ -161,10 +143,7 @@ def main():
         f"- 命中：{len(hits)} 只\n\n"
     )
 
-    if not hits:
-        md += "未发现符合条件的股票"
-        send_wechat("红利指数监控", md)
-    else:
+    if hits:
         for h in sorted(hits, key=lambda x: x["deviation"]):
             md += (
                 f"- {h['code']} {h['name']}（{h['index']}）  \n"
@@ -172,8 +151,10 @@ def main():
                 f"  偏离 {h['deviation']:.2f}%\n\n"
             )
         send_wechat(f"红利年线提醒（{len(hits)}只）", md)
+    else:
+        md += "未发现符合条件的股票"
+        send_wechat("红利指数监控", md)
 
-    # GitHub Actions Summary
     if GITHUB_SUMMARY:
         with open(GITHUB_SUMMARY, "a", encoding="utf-8") as f:
             f.write(md)

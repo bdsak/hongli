@@ -231,7 +231,7 @@ def get_stock_baostock(code, name, end_date):
             start_date=start_date_str,
             end_date=end_date_str,
             frequency="d",
-            adjustflag="3"  # 前复权
+            adjustflag="2"  # 前复权
         )
         
         if rs.error_code != '0':

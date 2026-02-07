@@ -11,7 +11,7 @@ from datetime import datetime
 THRESHOLD = 0.06
 SERVER_CHAN_KEY = os.getenv("SERVER_CHAN_KEY")
 GITHUB_SUMMARY = os.getenv("GITHUB_STEP_SUMMARY")
-STOCK_FILE = "stocks.txt"   # 本地股票文件
+STOCK_FILE = "stocks.txt"
 
 # ======================
 # 日志
@@ -23,30 +23,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ======================
-# 最近交易日
+# 最近交易日（仅用于取行情）
 # ======================
 def last_trade_date():
     cal = ak.tool_trade_date_hist_sina()
     cal["trade_date"] = pd.to_datetime(cal["trade_date"]).dt.date
-    today = datetime.now().date()
-    trade_day = cal[cal["trade_date"] <= today].iloc[-1]["trade_date"]
-    return trade_day.strftime("%Y%m%d"), trade_day
+    trade_day = cal.iloc[-1]["trade_date"]
+    return trade_day.strftime("%Y%m%d")
 
 # ======================
-# 读取本地股票
+# 本地股票
 # ======================
 def load_stocks():
     try:
         df = pd.read_csv(
             STOCK_FILE,
-            sep=None,          # 自动识别分隔符
+            sep=None,
             engine="python",
             header=None,
             names=["code", "name"]
         )
         df["code"] = df["code"].astype(str).str.zfill(6)
         stocks = list(df.itertuples(index=False, name=None))
-        logger.info(f"本地股票读取成功：{len(stocks)} 只")
+        logger.info(f"读取股票 {len(stocks)} 只")
         return stocks
     except Exception as e:
         logger.error(f"股票文件读取失败: {e}")
@@ -76,14 +75,13 @@ def get_stock(code, name, end_date):
             symbol=code,
             end_date=end_date,
             adjust="qfq",
-            indicator="MA"   # ⭐ 官方技术指标
+            indicator="MA"
         )
 
         if df is None or df.empty or "MA250" not in df.columns:
             return None
 
         last = df.iloc[-1]
-
         if pd.isna(last["MA250"]):
             return None
 
@@ -111,17 +109,14 @@ def check(stock):
 # 主程序
 # ======================
 def main():
-    logger.info("红利年线监控启动（官方MA250）")
+    logger.info("年线监控启动（不区分交易日）")
 
-    trade_str, trade_date = last_trade_date()
-    today = datetime.now().date()
-    status = "📈 今天有行情更新" if today == trade_date else "🛑 今天是非交易日"
-
+    end_date = last_trade_date()
     stocks = load_stocks()
     hits = []
 
     for code, name in stocks:
-        data = get_stock(code, name, trade_str)
+        data = get_stock(code, name, end_date)
         if not data:
             continue
 
@@ -131,8 +126,8 @@ def main():
 
     md = (
         f"# 年线监控结果\n\n"
-        f"- 状态：{status}\n"
         f"- 年线来源：官方 MA250\n"
+        f"- 扫描股票数：{len(stocks)}\n"
         f"- 命中：{len(hits)} 只\n\n"
     )
 

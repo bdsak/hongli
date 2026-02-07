@@ -2,18 +2,16 @@ import akshare as ak
 import pandas as pd
 import requests
 import os
-import time
 import logging
-import concurrent.futures
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ======================
 # 参数
 # ======================
 THRESHOLD = 0.06
-STOCK_FILE = "stocks.txt"   # ← 本地股票池文件
 SERVER_CHAN_KEY = os.getenv("SERVER_CHAN_KEY")
 GITHUB_SUMMARY = os.getenv("GITHUB_STEP_SUMMARY")
+STOCK_FILE = "stocks.txt"   # 本地股票文件
 
 # ======================
 # 日志
@@ -35,72 +33,67 @@ def last_trade_date():
     return trade_day.strftime("%Y%m%d"), trade_day
 
 # ======================
-# 微信
+# 读取本地股票
 # ======================
-def send_wechat(title, content):
-    if not SERVER_CHAN_KEY:
-        return
-    url = f"https://sctapi.ftqq.com/{SERVER_CHAN_KEY}.send"
-    requests.post(
-        url,
-        data={"title": title[:32], "desp": content, "desp_type": "markdown"},
-        timeout=15
-    )
-
-# ======================
-# 读取本地股票池
-# ======================
-def load_stocks(path):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"股票文件不存在: {path}")
-
+def load_stocks():
     try:
-        # 自动识别分隔符（tab / 逗号 / 空格）
         df = pd.read_csv(
-            path,
-            sep=None,
+            STOCK_FILE,
+            sep=None,          # 自动识别分隔符
             engine="python",
             header=None,
             names=["code", "name"]
         )
         df["code"] = df["code"].astype(str).str.zfill(6)
         stocks = list(df.itertuples(index=False, name=None))
-        logger.info(f"本地股票池加载成功，共 {len(stocks)} 只")
+        logger.info(f"本地股票读取成功：{len(stocks)} 只")
         return stocks
-
     except Exception as e:
         logger.error(f"股票文件读取失败: {e}")
         return []
 
 # ======================
-# 行情 + MA250
+# 微信
+# ======================
+def send_wechat(title, content):
+    if not SERVER_CHAN_KEY:
+        logger.warning("未配置 SERVER_CHAN_KEY")
+        return
+    url = f"https://sctapi.ftqq.com/{SERVER_CHAN_KEY}.send"
+    requests.post(url, data={
+        "title": title[:32],
+        "desp": content,
+        "desp_type": "markdown"
+    }, timeout=15)
+    logger.info("微信通知已发送")
+
+# ======================
+# 行情 + 官方 MA250
 # ======================
 def get_stock(code, name, end_date):
     try:
-        start = (
-            datetime.strptime(end_date, "%Y%m%d") - timedelta(days=520)
-        ).strftime("%Y%m%d")
-
         df = ak.stock_zh_a_hist(
             symbol=code,
-            start_date=start,
             end_date=end_date,
-            adjust="qfq"
+            adjust="qfq",
+            indicator="MA"   # ⭐ 官方技术指标
         )
 
-        if df is None or len(df) < 250:
+        if df is None or df.empty or "MA250" not in df.columns:
             return None
 
-        df["MA250"] = df["收盘"].rolling(250).mean()
         last = df.iloc[-1]
+
+        if pd.isna(last["MA250"]):
+            return None
 
         return {
             "code": code,
             "name": name,
             "close": float(last["收盘"]),
-            "ma250": float(last["MA250"])
+            "ma250": float(last["MA250"]),
+            "source": "官方MA250"
         }
-
     except Exception:
         return None
 
@@ -118,47 +111,42 @@ def check(stock):
 # 主程序
 # ======================
 def main():
-    logger.info("红利年线监控启动（本地股票池模式）")
+    logger.info("红利年线监控启动（官方MA250）")
 
     trade_str, trade_date = last_trade_date()
     today = datetime.now().date()
     status = "📈 今天有行情更新" if today == trade_date else "🛑 今天是非交易日"
 
-    stocks = load_stocks(STOCK_FILE)
+    stocks = load_stocks()
     hits = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        tasks = [
-            pool.submit(get_stock, code, name, trade_str)
-            for code, name in stocks
-        ]
+    for code, name in stocks:
+        data = get_stock(code, name, trade_str)
+        if not data:
+            continue
 
-        for t in concurrent.futures.as_completed(tasks):
-            data = t.result()
-            if not data:
-                continue
-            hit = check(data)
-            if hit:
-                hits.append(hit)
+        hit = check(data)
+        if hit:
+            hits.append(hit)
 
     md = (
         f"# 年线监控结果\n\n"
         f"- 状态：{status}\n"
-        f"- 股票池：{len(stocks)} 只\n"
+        f"- 年线来源：官方 MA250\n"
         f"- 命中：{len(hits)} 只\n\n"
     )
 
-    if hits:
+    if not hits:
+        md += "未发现符合条件的股票"
+        send_wechat("年线监控", md)
+    else:
         for h in sorted(hits, key=lambda x: x["deviation"]):
             md += (
                 f"- {h['code']} {h['name']}  \n"
                 f"  收盘 {h['close']:.2f} ｜ 年线 {h['ma250']:.2f}  \n"
-                f"  偏离 {h['deviation']:.2f}%\n\n"
+                f"  偏离 {h['deviation']:.2f}% ｜ {h['source']}\n\n"
             )
         send_wechat(f"年线提醒（{len(hits)}只）", md)
-    else:
-        md += "未发现符合条件的股票"
-        send_wechat("年线监控", md)
 
     if GITHUB_SUMMARY:
         with open(GITHUB_SUMMARY, "a", encoding="utf-8") as f:

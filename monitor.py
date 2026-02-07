@@ -84,22 +84,32 @@ def get_stock(code, name, end_date):
         df["MA250"] = df["收盘"].rolling(250).mean()
         last = df.iloc[-1]
 
+        close_price = float(last["收盘"])
+        ma250_price = float(last["MA250"])
+        
+        # 计算偏离度（百分比）
+        if ma250_price > 0:
+            deviation = ((ma250_price - close_price) / ma250_price) * 100
+        else:
+            deviation = 0
+
         return {
             "code": code,
             "name": name,
-            "close": float(last["收盘"]),
-            "ma250": float(last["MA250"])
+            "close": close_price,
+            "ma250": ma250_price,
+            "deviation": deviation
         }
-    except Exception:
+    except Exception as e:
+        logger.warning(f"获取 {code} {name} 数据失败: {e}")
         return None
 
 # ======================
 # 判断
 # ======================
 def check(stock):
-    dev = (stock["ma250"] - stock["close"]) / stock["ma250"]
-    if 0 < dev <= THRESHOLD:
-        stock["deviation"] = dev * 100
+    dev = stock["deviation"]
+    if 0 < dev <= THRESHOLD * 100:  # 转换为百分比
         return stock
     return None
 
@@ -118,47 +128,74 @@ def main():
     index_code = "000922"
     
     hits = []
-    all_components = []  # 存储所有成分股信息
+    all_stocks_data = []  # 存储所有成分股的价格和年线数据
     
     stocks = get_index_stocks(index_code, index_name)
     
-    # 存储所有成分股
-    all_components = stocks.copy()
+    logger.info(f"开始获取 {len(stocks)} 只成分股的价格和年线数据...")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         tasks = [
             pool.submit(get_stock, c, n, trade_str)
             for c, n in stocks
         ]
-        for t in concurrent.futures.as_completed(tasks):
+        for idx, t in enumerate(concurrent.futures.as_completed(tasks), 1):
             data = t.result()
-            if not data:
-                continue
-            hit = check(data)
-            if hit:
-                hit["index"] = index_name
-                hits.append(hit)
+            if data:
+                all_stocks_data.append(data)
+                # 检查是否符合条件
+                hit = check(data)
+                if hit:
+                    hit["index"] = index_name
+                    hits.append(hit)
+                
+                # 每完成10个打印一次进度
+                if idx % 10 == 0:
+                    logger.info(f"已获取 {idx}/{len(stocks)} 只股票数据")
+            else:
+                logger.warning(f"获取第 {idx} 只股票数据失败")
 
+    # 按照偏离度对所有股票排序
+    all_stocks_data.sort(key=lambda x: x["deviation"], reverse=True)
+    
     # 生成消息内容
-    md = f"# 红利指数年线监控\n\n- 状态：{status}\n- 指数：{index_name}({index_code})\n- 成分股总数：{len(all_components)} 只\n- 命中：{len(hits)} 只\n\n"
+    md = f"# 红利指数年线监控\n\n"
+    md += f"- **状态**: {status}\n"
+    md += f"- **指数**: {index_name}({index_code})\n"
+    md += f"- **成分股总数**: {len(stocks)} 只\n"
+    md += f"- **成功获取数据**: {len(all_stocks_data)} 只\n"
+    md += f"- **命中**: {len(hits)} 只\n"
+    md += f"- **阈值**: 年线下方 {THRESHOLD*100:.1f}%\n\n"
 
     if not hits:
+        md += "## 📊 符合条件的股票\n\n"
         md += "未发现符合条件的股票\n\n"
     else:
         md += "## 📊 符合条件的股票\n\n"
-        for h in sorted(hits, key=lambda x: x["deviation"]):
-            md += (
-                f"- **{h['code']} {h['name']}**（{h['index']}）  \n"
-                f"  收盘 {h['close']:.2f} ｜ 年线 {h['ma250']:.2f}  \n"
-                f"  偏离 {h['deviation']:.2f}%\n\n"
-            )
+        md += f"| 序号 | 股票代码 | 股票名称 | 收盘价 | 年线 | 偏离度 |\n"
+        md += f"|------|----------|----------|--------|------|--------|\n"
+        for idx, h in enumerate(sorted(hits, key=lambda x: x["deviation"]), 1):
+            md += f"| {idx} | {h['code']} | {h['name']} | {h['close']:.2f} | {h['ma250']:.2f} | {h['deviation']:.2f}% |\n"
+        md += "\n"
     
-    # 添加所有成分股信息
-    md += "## 📋 全部成分股\n\n"
-    md += f"| 序号 | 股票代码 | 股票名称 |\n"
-    md += f"|------|----------|----------|\n"
-    for idx, (code, name) in enumerate(all_components, 1):
-        md += f"| {idx} | {code} | {name} |\n"
+    # 添加所有成分股的价格和年线数据
+    md += "## 📋 所有成分股价格和年线数据\n\n"
+    md += f"**数据获取时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    md += f"| 序号 | 股票代码 | 股票名称 | 收盘价 | 年线 | 偏离度 |\n"
+    md += f"|------|----------|----------|--------|------|--------|\n"
+    
+    for idx, stock in enumerate(all_stocks_data, 1):
+        # 标记符合条件的股票
+        marker = " ✅" if 0 < stock["deviation"] <= THRESHOLD * 100 else ""
+        md += f"| {idx} | {stock['code']} | {stock['name']}{marker} | {stock['close']:.2f} | {stock['ma250']:.2f} | {stock['deviation']:.2f}% |\n"
+    
+    md += f"\n**说明**: ✅ 标记表示该股票符合条件（偏离度在 0% 到 {THRESHOLD*100:.1f}% 之间）\n"
+    
+    # 添加统计信息
+    md += f"\n## 📈 统计信息\n\n"
+    md += f"- 最高偏离度: {all_stocks_data[0]['deviation']:.2f}% ({all_stocks_data[0]['code']} {all_stocks_data[0]['name']})\n"
+    md += f"- 最低偏离度: {all_stocks_data[-1]['deviation']:.2f}% ({all_stocks_data[-1]['code']} {all_stocks_data[-1]['name']})\n"
+    md += f"- 平均偏离度: {sum(s['deviation'] for s in all_stocks_data)/len(all_stocks_data):.2f}%\n"
     
     # 发送微信通知
     if not hits:
@@ -171,7 +208,7 @@ def main():
         with open(GITHUB_SUMMARY, "a", encoding="utf-8") as f:
             f.write(md)
 
-    logger.info(f"运行完成 - 成分股总数: {len(all_components)}, 命中: {len(hits)}")
+    logger.info(f"运行完成 - 成分股总数: {len(stocks)}, 成功获取: {len(all_stocks_data)}, 命中: {len(hits)}")
 
 if __name__ == "__main__":
     main()

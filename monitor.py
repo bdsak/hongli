@@ -41,24 +41,32 @@ def send_wechat(title, content):
     }, timeout=15)
 
 # ======================
-# 成分股（正确来源）
+# 成分股（严格按交易所）
 # ======================
 def get_index_stocks(index_code, index_name):
     try:
         if index_code == "000922":  # 中证红利
             df = ak.index_stock_cons_csindex(symbol=index_code)
-            stocks = df[["成分券代码", "成分券名称"]]
-        else:  # 上证红利 / 深证红利
-            df = ak.index_stock_cons(symbol=index_code)
-            stocks = df.iloc[:, :2]
+            pairs = df[["成分券代码", "成分券名称"]]
 
-        result = []
-        for c, n in stocks.itertuples(index=False):
+        elif index_code == "000015":  # 上证红利
+            df = ak.index_stock_cons_sse(symbol=index_code)
+            pairs = df[["成分股代码", "成分股名称"]]
+
+        elif index_code == "399324":  # 深证红利
+            df = ak.index_stock_cons_szse(symbol=index_code)
+            pairs = df[["成分股代码", "成分股名称"]]
+
+        else:
+            return []
+
+        stocks = []
+        for c, n in pairs.itertuples(index=False):
             code = str(c).split(".")[0].zfill(6)
-            result.append((code, n))
+            stocks.append((code, n))
 
-        logger.info(f"{index_name} 成分股 {len(result)} 只")
-        return result
+        logger.info(f"{index_name} 成分股 {len(stocks)} 只")
+        return stocks
 
     except Exception as e:
         logger.error(f"{index_name} 成分股获取失败: {e}")

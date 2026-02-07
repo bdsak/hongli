@@ -113,34 +113,29 @@ def main():
     today = datetime.now().date()
     status = "📈 今天有行情更新" if today == trade_date else "🛑 今天是非交易日"
 
-    index_map = {
-        "中证红利": "000922",
-        "上证红利": "000015",
-        "深证红利": "399324"
-    }
-
+    # 只保留中证红利
+    index_name = "中证红利"
+    index_code = "000922"
+    
     hits = []
+    
+    stocks = get_index_stocks(index_code, index_name)
 
-    for index_name, index_code in index_map.items():
-        stocks = get_index_stocks(index_code, index_name)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        tasks = [
+            pool.submit(get_stock, c, n, trade_str)
+            for c, n in stocks
+        ]
+        for t in concurrent.futures.as_completed(tasks):
+            data = t.result()
+            if not data:
+                continue
+            hit = check(data)
+            if hit:
+                hit["index"] = index_name
+                hits.append(hit)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-            tasks = [
-                pool.submit(get_stock, c, n, trade_str)
-                for c, n in stocks
-            ]
-            for t in concurrent.futures.as_completed(tasks):
-                data = t.result()
-                if not data:
-                    continue
-                hit = check(data)
-                if hit:
-                    hit["index"] = index_name
-                    hits.append(hit)
-
-        time.sleep(1)
-
-    md = f"# 红利指数年线监控\n\n- 状态：{status}\n- 命中：{len(hits)} 只\n\n"
+    md = f"# 红利指数年线监控\n\n- 状态：{status}\n- 命中：{len(hits)} 只\n- 指数：{index_name}({index_code})\n\n"
 
     if not hits:
         md += "未发现符合条件的股票"

@@ -118,8 +118,12 @@ def main():
     index_code = "000922"
     
     hits = []
+    all_components = []  # 存储所有成分股信息
     
     stocks = get_index_stocks(index_code, index_name)
+    
+    # 存储所有成分股
+    all_components = stocks.copy()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         tasks = [
@@ -135,25 +139,39 @@ def main():
                 hit["index"] = index_name
                 hits.append(hit)
 
-    md = f"# 红利指数年线监控\n\n- 状态：{status}\n- 命中：{len(hits)} 只\n- 指数：{index_name}({index_code})\n\n"
+    # 生成消息内容
+    md = f"# 红利指数年线监控\n\n- 状态：{status}\n- 指数：{index_name}({index_code})\n- 成分股总数：{len(all_components)} 只\n- 命中：{len(hits)} 只\n\n"
 
     if not hits:
-        md += "未发现符合条件的股票"
-        send_wechat("红利指数监控", md)
+        md += "未发现符合条件的股票\n\n"
     else:
+        md += "## 📊 符合条件的股票\n\n"
         for h in sorted(hits, key=lambda x: x["deviation"]):
             md += (
-                f"- {h['code']} {h['name']}（{h['index']}）  \n"
+                f"- **{h['code']} {h['name']}**（{h['index']}）  \n"
                 f"  收盘 {h['close']:.2f} ｜ 年线 {h['ma250']:.2f}  \n"
                 f"  偏离 {h['deviation']:.2f}%\n\n"
             )
+    
+    # 添加所有成分股信息
+    md += "## 📋 全部成分股\n\n"
+    md += f"| 序号 | 股票代码 | 股票名称 |\n"
+    md += f"|------|----------|----------|\n"
+    for idx, (code, name) in enumerate(all_components, 1):
+        md += f"| {idx} | {code} | {name} |\n"
+    
+    # 发送微信通知
+    if not hits:
+        send_wechat("红利指数监控", md)
+    else:
         send_wechat(f"红利年线提醒（{len(hits)}只）", md)
 
+    # 保存到GitHub摘要
     if GITHUB_SUMMARY:
         with open(GITHUB_SUMMARY, "a", encoding="utf-8") as f:
             f.write(md)
 
-    logger.info("运行完成")
+    logger.info(f"运行完成 - 成分股总数: {len(all_components)}, 命中: {len(hits)}")
 
 if __name__ == "__main__":
     main()
